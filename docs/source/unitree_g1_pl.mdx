@@ -1,0 +1,464 @@
+# Unitree G1 - Przewodnik po Robocie Humanoidalnym
+
+Ten przewodnik obejmuje kompletny proces konfiguracji robota humanoidalnego Unitree G1, od początkowego połączenia po uruchomienie algorytmów lokomotorycznych gr00t_wbc.
+
+## O Robocie Unitree G1
+
+### Co to jest Unitree G1 EDU?
+
+Unitree G1 EDU to zaawansowany robot humanoidalny przeznaczony do celów edukacyjnych i badawczych. Robot posiada:
+- **23 lub 29 stopni swobody (DOF)** - sterowane stawy pozwalające na wykonywanie złożonych ruchów
+- **System IMU** - czujniki inercyjne do wykrywania orientacji i ruchu
+- **Kamery** - do percepcji wizualnej otoczenia
+- **Zdalne sterowanie** - kontroler bezprzewodowy do manualnego sterowania
+
+### Wsparcie w LeRobot
+
+Wspieramy obie wersje G1 EDU (29 i 23 DOF). Wprowadziliśmy:
+
+- **Klasę robota `unitree g1`** - obsługuje niskopoziomowe odczytywanie i zapisywanie danych z/do humanoidalnego robota
+- **Most komunikacyjny ZMQ socket** - do zdalnej komunikacji i strumieniowania obrazu z kamery, umożliwiający zdalne wdrażanie polityk przez WiFi, Ethernet lub bezpośrednio na robocie
+- **Polityki lokomotoryczne** - algorytmy chodzenia z NVIDIA gr00t i Amazon FAR Holosoma
+- **Tryb symulacji** - do testowania polityk bez fizycznego robota w środowisku MuJoCo
+
+---
+
+## Część 1: Przewodnik po Połączeniu
+
+### Krok 1: Konfiguracja Interfejsu Ethernet
+
+Ustaw statyczny adres IP w tej samej podsieci co robot:
+
+```bash
+# Zamień 'enp131s0' na nazwę swojego interfejsu ethernet (sprawdź za pomocą `ip a`)
+sudo ip addr flush dev enp131s0
+sudo ip addr add 192.168.123.200/24 dev enp131s0
+sudo ip link set enp131s0 up
+```
+
+**Uwaga:** IP Ethernetu robota G1 jest stałe i wynosi `192.168.123.164`. Twój komputer musi używać `192.168.123.x` gdzie x ≠ 164.
+
+**Wyjaśnienie:** 
+- `ip addr flush` - czyści stare adresy IP z interfejsu
+- `ip addr add` - dodaje nowy statyczny adres IP
+- `/24` oznacza maskę podsieci (255.255.255.0)
+- Dzięki temu Twój komputer i robot są w tej samej sieci lokalnej
+
+### Krok 2: Połączenie SSH z Robotem
+
+```bash
+ssh unitree@192.168.123.164
+# Hasło: 123
+```
+
+Po pomyślnym połączeniu, jesteś zalogowany do komputera Orin wbudowanego w robota G1.
+
+**Co to jest SSH?**
+SSH (Secure Shell) to protokół pozwalający na bezpieczne zdalne logowanie do innego komputera. W tym przypadku łączysz się z komputerem wbudowanym w robota.
+
+---
+
+## Część 2: Aktywacja WiFi na Robocie
+
+Interfejs Wlan0 (WiFi) jest domyślnie wyłączony na G1. Aby go włączyć:
+
+### Krok 1: Włączenie Sprzętu WiFi
+
+```bash
+# Odblokowanie WiFi (usunięcie blokady sprzętowej)
+sudo rfkill unblock wifi
+sudo rfkill unblock all
+
+# Aktywacja interfejsu wlan0
+sudo ip link set wlan0 up
+
+# Włączenie kontroli NetworkManager nad wlan0
+sudo nmcli radio wifi on
+sudo nmcli device set wlan0 managed yes
+sudo systemctl restart NetworkManager
+```
+
+**Wyjaśnienie:**
+- `rfkill` - narzędzie do włączania/wyłączania urządzeń bezprzewodowych
+- `ip link set up` - aktywuje interfejs sieciowy
+- `NetworkManager` - usługa zarządzająca połączeniami sieciowymi w systemie Linux
+
+### Krok 2: Przekierowanie Internetu
+
+**Na Twoim laptopie:**
+
+```bash
+# Włączenie przekazywania pakietów IP (routing)
+sudo sysctl -w net.ipv4.ip_forward=1
+
+# Konfiguracja NAT (zamień wlp132s0f0 na nazwę Twojego interfejsu WiFi)
+sudo iptables -t nat -A POSTROUTING -o wlp132s0f0 -s 192.168.123.0/24 -j MASQUERADE
+sudo iptables -A FORWARD -i wlp132s0f0 -o enp131s0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -A FORWARD -i enp131s0 -o wlp132s0f0 -j ACCEPT
+```
+
+**Wyjaśnienie NAT:**
+NAT (Network Address Translation) pozwala robotowi korzystać z połączenia internetowego Twojego laptopa. Twój laptop staje się "bramą" dla robota do internetu.
+
+**Na robocie G1:**
+
+```bash
+# Dodanie laptopa jako domyślnej bramy (gateway)
+sudo ip route del default 2>/dev/null || true
+sudo ip route add default via 192.168.123.200 dev eth0
+echo "nameserver 8.8.8.8" | sudo tee /etc/resolv.conf
+
+# Test połączenia z internetem
+ping -c 3 8.8.8.8
+```
+
+**Wyjaśnienie:**
+- `ip route` - zarządza tablicą routingu (określa, dokąd wysyłać pakiety sieciowe)
+- `8.8.8.8` - publiczny DNS Google, używany do testowania połączenia internetowego
+
+### Krok 3: Połączenie z Siecią WiFi
+
+```bash
+# Lista dostępnych sieci WiFi
+nmcli device wifi list
+
+# Połączenie z Twoją siecią WiFi (przykład)
+sudo nmcli connection add type wifi ifname wlan0 con-name "TwojaSiec" ssid "TwojaSiec"
+sudo nmcli connection modify "TwojaSiec" wifi-sec.key-mgmt wpa-psk
+sudo nmcli connection modify "TwojaSiec" wifi-sec.psk "TwojeHaslo"
+sudo nmcli connection modify "TwojaSiec" connection.autoconnect yes
+sudo nmcli connection up "TwojaSiec"
+
+# Sprawdzenie adresu IP WiFi
+ip a show wlan0
+```
+
+**Wyjaśnienie:**
+- `nmcli` - narzędzie wiersza poleceń do zarządzania NetworkManager
+- `ssid` - nazwa sieci WiFi
+- `wpa-psk` - typ zabezpieczenia WiFi (WPA z kluczem współdzielonym)
+- `autoconnect` - automatyczne łączenie przy starcie systemu
+
+### Krok 4: SSH przez WiFi
+
+Po połączeniu z WiFi, zanotuj adres IP robota i odłącz kabel Ethernet. Teraz możesz połączyć się przez WiFi:
+
+```bash
+ssh unitree@<ADRES_IP_ROBOTA>
+# Hasło: 123
+```
+
+Zamień `<ADRES_IP_ROBOTA>` na rzeczywisty adres IP WiFi Twojego robota.
+
+**Dlaczego WiFi jest lepsze?**
+Połączenie WiFi daje swobodę ruchu - robot może się poruszać bez przeszkadzającego kabla Ethernet.
+
+---
+
+## Część 3: Konfiguracja Serwera Robota
+
+### Czym jest Serwer Robota?
+
+Serwer robota to program działający na komputerze wbudowanym w robota (Orin), który:
+1. **Odbiera obserwacje** z czujników robota (pozycje stawów, IMU, kamery)
+2. **Przekazuje je** przez sieć do komputera sterującego
+3. **Odbiera akcje** z komputera sterującego
+4. **Wykonuje je** na robocie
+
+Ten mechanizm umożliwia zdalne sterowanie robotem z zewnętrznego komputera.
+
+### Krok 1: Instalacja LeRobot na Komputerze Orin (w robocie)
+
+SSH do robota i zainstaluj LeRobot:
+
+```bash
+ssh unitree@<ADRES_IP_ROBOTA>
+
+# Tworzenie środowiska wirtualnego Python
+conda create -y -n lerobot python=3.10
+conda activate lerobot
+
+# Klonowanie repozytorium LeRobot
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
+
+# Instalacja z dodatkowymi zależnościami dla Unitree G1
+pip install -e '.[unitree_g1]'
+
+# Instalacja SDK Unitree
+git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
+cd unitree_sdk2_python && pip install -e .
+```
+
+**Wyjaśnienie:**
+- `conda` - menedżer środowisk Python, izoluje zależności projektu
+- `pip install -e` - instaluje pakiet w trybie edytowalnym (zmiany w kodzie są od razu widoczne)
+- `[unitree_g1]` - instaluje dodatkowe pakiety specyficzne dla Unitree G1
+
+**Uwaga:** Unitree SDK wymaga CycloneDDS v0.10.2. Zobacz [dokumentację Unitree SDK](https://github.com/unitreerobotics/unitree_sdk2_python) po szczegóły.
+
+### Krok 2: Uruchomienie Serwera Robota
+
+Na robocie:
+
+```bash
+python src/lerobot/robots/unitree_g1/run_g1_server.py
+```
+
+**Ważne:** Pozostaw ten terminal działający. Serwer musi być aktywny dla zdalnego sterowania.
+
+**Co robi serwer?**
+Serwer tworzy "most" komunikacyjny między niskopoziomowymi komponentami robota (silniki, czujniki) a Twoim zewnętrznym komputerem. Używa protokołu ZMQ do przesyłania danych przez sieć.
+
+---
+
+## Część 4: Sterowanie Robotem
+
+Po uruchomieniu serwera robota, możesz teraz sterować robotem zdalnie. Uruchommy politykę lokomotoryczną!
+
+### Czym jest Polityka Lokomotoryczna?
+
+Polityka lokomotoryczna to model uczenia maszynowego (algorytm), który:
+- **Analizuje** aktualny stan robota (pozycje stawów, orientacja, prędkości)
+- **Oblicza** optymalne akcje (docelowe pozycje stawów)
+- **Umożliwia** robotowi chodzenie, zachowywanie równowagi i poruszanie się
+
+### Krok 1: Instalacja LeRobot na Twoim Komputerze
+
+```bash
+conda create -y -n lerobot python=3.10
+conda activate lerobot
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
+pip install -e '.[unitree_g1]'
+git clone https://github.com/unitreerobotics/unitree_sdk2_python.git
+cd unitree_sdk2_python && pip install -e .
+```
+
+### Krok 2: Aktualizacja IP Robota w Konfiguracji
+
+Edytuj plik konfiguracyjny, aby dopasować adres IP WiFi Twojego robota:
+
+```python
+# W pliku src/lerobot/robots/unitree_g1/config_unitree_g1.py
+robot_ip: str = "<ADRES_IP_ROBOTA>"  # Zamień na adres WiFi robota
+```
+
+**Dlaczego to ważne?**
+Komputer musi wiedzieć, gdzie wysyłać komendy. Adres IP jest jak "adres domowy" robota w sieci.
+
+### Krok 3: Uruchomienie Polityki Lokomotorycznej
+
+```bash
+# Uruchom kontroler lokomotoryczny GR00T
+python examples/unitree_g1/gr00t_locomotion.py --repo-id "nepyope/GR00T-WholeBodyControl_g1"
+
+# Uruchom kontroler lokomotoryczny Holosoma
+python examples/unitree_g1/holosoma_locomotion.py
+```
+
+**Co to jest GR00T i Holosoma?**
+- **GR00T** (NVIDIA) - zaawansowany algorytm sterowania całym ciałem robota, używa sieci neuronowych
+- **Holosoma** (Amazon) - inny algorytm lokomotoryczny z innych badań
+
+Oba są wytrenowanymi modelami AI, które "wiedzą" jak chodzić.
+
+**Sterowanie:**
+- **LY** (lewy joystick góra/dół) - ruch do przodu/tyłu
+- **LX** (lewy joystick lewo/prawo) - ruch w bok
+- **RX** (prawy joystick lewo/prawo) - obrót
+- **R1** - podniesienie talii
+- **R2** - opuszczenie talii
+
+Naciśnij `Ctrl+C`, aby zatrzymać politykę.
+
+---
+
+## Część 5: Uruchomienie w Trybie Symulacji (MuJoCo)
+
+### Dlaczego Symulacja?
+
+Przed wdrożeniem na prawdziwym robocie, możesz:
+1. **Przetestować kod** bez ryzyka uszkodzenia sprzętu
+2. **Szybko iterować** - symulacja działa szybciej niż rzeczywistość
+3. **Debugować** - łatwiej znaleźć błędy w bezpiecznym środowisku
+
+### Czym jest MuJoCo?
+
+MuJoCo (Multi-Joint dynamics with Contact) to zaawansowany silnik fizyczny do symulacji robotów. Tworzy realistyczną wirtualną wersję robota.
+
+Możesz testować polityki przed wdrożeniem na fizycznym robocie używając symulacji MuJoCo. Ustaw `is_simulation=True` w konfiguracji lub przekaż `--robot.is_simulation=true` przez CLI.
+
+### Kalibracja Egzoszkieletu Teleoperatora
+
+```bash
+lerobot-calibrate \
+    --teleop.type=unitree_g1 \
+    --teleop.left_arm_config.port=/dev/ttyACM1 \
+    --teleop.right_arm_config.port=/dev/ttyACM0 \
+    --teleop.id=exo
+```
+
+**Co to jest Egzoszkielet Teleoperatora?**
+To fizyczne urządzenie, które nosisz na ramionach. Gdy poruszasz ramionami, robot powtarza Twoje ruchy w czasie rzeczywistym. To sposób na "nauczenie" robota przez demonstrację.
+
+### Teleopearacja w Symulacji
+
+```bash
+lerobot-teleoperate \
+    --robot.type=unitree_g1 \
+    --robot.is_simulation=true \
+    --teleop.type=unitree_g1 \
+    --teleop.left_arm_config.port=/dev/ttyACM1 \
+    --teleop.right_arm_config.port=/dev/ttyACM0 \
+    --teleop.id=exo \
+    --fps=100
+```
+
+### Nagrywanie Zbioru Danych w Symulacji
+
+```bash
+python -m lerobot.scripts.lerobot_record \
+    --robot.type=unitree_g1 \
+    --robot.is_simulation=true \
+    --robot.cameras='{"global_view": {"type": "zmq", "server_address": "localhost", "port": 5555, "camera_name": "head_camera", "width": 640, "height": 480, "fps": 30}}' \
+    --teleop.type=unitree_g1 \
+    --teleop.left_arm_config.port=/dev/ttyACM1 \
+    --teleop.right_arm_config.port=/dev/ttyACM0 \
+    --teleop.id=exo \
+    --dataset.repo_id=twoja-nazwa/nazwa-datasetu \
+    --dataset.single_task="Test" \
+    --dataset.num_episodes=2 \
+    --dataset.episode_time_s=5 \
+    --dataset.reset_time_s=5 \
+    --dataset.push_to_hub=true
+```
+
+**Dlaczego nagrywać dane?**
+Zbiory danych demonstracyjnych są używane do trenowania modeli AI. Robot uczy się wykonywać zadania obserwując jak Ty je wykonujesz.
+
+Przykładowy zbiór danych symulacyjny: [nepyope/teleop_test_sim](https://huggingface.co/datasets/nepyope/teleop_test_sim)
+
+---
+
+## Część 6: Praca z Prawdziwym Robotem
+
+Po uruchomieniu serwera robota na G1 (patrz Część 3), możesz teleoperować i nagrywać na prawdziwym robocie.
+
+### Uruchomienie Serwera Kamery
+
+Na robocie, uruchom serwer obrazów ZMQ:
+
+```bash
+python src/lerobot/cameras/zmq/image_server.py
+```
+
+**Co to robi?**
+Serwer kamery przesyła obrazy z kamery robota przez sieć. Te obrazy są zapisywane razem z danymi o pozycjach stawów, tworząc kompletny zbiór danych.
+
+Pozostaw to działające w osobnym terminalu dla strumieniowania kamery podczas nagrywania.
+
+### Teleoperacja Prawdziwego Robota
+
+```bash
+lerobot-teleoperate \
+    --robot.type=unitree_g1 \
+    --robot.is_simulation=false \
+    --teleop.type=unitree_g1 \
+    --teleop.left_arm_config.port=/dev/ttyACM1 \
+    --teleop.right_arm_config.port=/dev/ttyACM0 \
+    --teleop.id=exo \
+    --fps=100
+```
+
+### Nagrywanie Zbioru Danych na Prawdziwym Robocie
+
+```bash
+python -m lerobot.scripts.lerobot_record \
+    --robot.type=unitree_g1 \
+    --robot.is_simulation=false \
+    --robot.cameras='{"global_view": {"type": "zmq", "server_address": "172.18.129.215", "port": 5555, "camera_name": "head_camera", "width": 640, "height": 480, "fps": 30}}' \
+    --teleop.type=unitree_g1 \
+    --teleop.left_arm_config.port=/dev/ttyACM1 \
+    --teleop.right_arm_config.port=/dev/ttyACM0 \
+    --teleop.id=exo \
+    --dataset.repo_id=twoja-nazwa/nazwa-datasetu \
+    --dataset.single_task="Test" \
+    --dataset.num_episodes=2 \
+    --dataset.episode_time_s=5 \
+    --dataset.reset_time_s=5 \
+    --dataset.push_to_hub=true
+```
+
+**Uwaga:** Zaktualizuj `server_address` aby dopasować do adresu IP serwera kamery Twojego robota.
+
+Przykładowy zbiór danych z prawdziwego robota: [nepyope/teleop_test_real](https://huggingface.co/datasets/nepyope/teleop_test_real)
+
+---
+
+## Przepływ Pracy: Od Zbierania Danych do Wdrożenia
+
+Oto kompletny proces pracy z robotem Unitree G1:
+
+### 1. Zbieranie Danych (Data Collection)
+```
+Egzoszkielet → Ruch Człowieka → Robot Powtarza → Zapis Danych
+```
+Demonstrujesz zadanie, robot naśladuje i zapisuje wszystko.
+
+### 2. Przetwarzanie Danych (Data Processing)
+```
+Surowe Dane → Format LeRobotDataset → Upload do Hugging Face Hub
+```
+Dane są standaryzowane i udostępniane.
+
+### 3. Trenowanie Modelu (Model Training)
+```
+Dataset + Architektura Policy → Trening GPU → Wytrenowany Model
+```
+Model AI uczy się z demonstracji.
+
+### 4. Walidacja w Symulacji
+```
+Wytrenowany Model → Test w MuJoCo → Ocena Wydajności
+```
+Bezpieczne testowanie przed wdrożeniem.
+
+### 5. Wdrożenie na Robocie (Deployment)
+```
+Zwalidowany Model → Prawdziwy Robot → Autonomiczne Wykonanie
+```
+Robot wykonuje zadanie samodzielnie!
+
+---
+
+## Dodatkowe Zasoby
+
+- [Dokumentacja Unitree SDK](https://github.com/unitreerobotics/unitree_sdk2_python)
+- [GR00T-WholeBodyControl](https://github.com/NVlabs/GR00T-WholeBodyControl)
+- [Holosoma](https://github.com/amazon-far/holosoma)
+- [Dokumentacja LeRobot](https://github.com/huggingface/lerobot)
+- [Unitree_IL_Lerobot](https://github.com/unitreerobotics/unitree_IL_lerobot)
+
+---
+
+## Rozwiązywanie Problemów
+
+### Problem: Nie mogę połączyć się z robotem przez Ethernet
+- Sprawdź czy kabel jest dobrze podłączony
+- Zweryfikuj adres IP: `ip a` 
+- Upewnij się, że jesteś w podsieci 192.168.123.x
+
+### Problem: Serwer robota się nie uruchamia
+- Sprawdź czy zainstalowałeś wszystkie zależności
+- Zweryfikuj wersję CycloneDDS
+- Sprawdź logi błędów w terminalu
+
+### Problem: Robot nie reaguje na komendy
+- Upewnij się, że serwer działa na robocie
+- Sprawdź czy IP w konfiguracji jest poprawny
+- Zweryfikuj połączenie sieciowe: `ping <ADRES_IP_ROBOTA>`
+
+---
+
+_Ostatnia aktualizacja: Grudzień 2025_
